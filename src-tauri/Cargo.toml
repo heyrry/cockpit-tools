@@ -33,7 +33,7 @@ toml_edit = "0.20"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = "0.4"
 dirs = "5.0"
-reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "zstd", "stream", "socks", "blocking"] }
+reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "zstd", "stream", "socks", "blocking", "rustls-tls-native-roots"] }
 # Classify subscription TLS failures by type; macOS error Display may omit SSL/TLS.
 native-tls = "0.2"
 quick-xml = "0.40"
