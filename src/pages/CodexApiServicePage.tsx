@@ -28,6 +28,8 @@ import {
   reconcileCodexApiKeyScopeAccountIds,
 } from "../utils/codexApiKeyAccountScope";
 import { resolveCodexApiServiceCompatibilityBaseUrls } from "../utils/codexApiServiceCompatibility";
+import { useCodexTimeoutSettingsNavigation } from "../hooks/useCodexTimeoutSettingsNavigation";
+import { useCodexApiServiceRestart } from "../hooks/useCodexApiServiceRestart";
 import { clearRecoveredCodexGatewayError } from "../utils/codexGatewayKeyRecovery";
 import * as codexLocalAccessService from "../services/codexLocalAccessService";
 import * as codexInstanceService from "../services/codexInstanceService";
@@ -72,9 +74,6 @@ import {
   summarizeCodexQuotaPool,
 } from "../utils/codexQuotaPool";
 import { filterCodexLocalAccessAccountIds } from "../utils/codexLocalAccessAccounts";
-import {
-  isCodexLocalAccessRiskNoticeDismissed,
-} from "../utils/codexLocalAccessRiskNotice";
 import { requestCodexOpenAddAccount } from "../utils/codexAddAccountRequest";
 import { scrollElementTo } from "../utils/reducedMotion";
 import { useCodexAccountOverviewMemberView } from "../hooks/useCodexAccountOverviewMemberView";
@@ -716,7 +715,6 @@ export function useCodexApiServicePageController() {
   const [testChatInput, setTestChatInput] = useState("");
   const [testDialogError, setTestDialogError] = useState("");
   const [portKilling, setPortKilling] = useState(false);
-  const [sidecarRestarting, setSidecarRestarting] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   useEffect(() => {
@@ -918,7 +916,7 @@ export function useCodexApiServicePageController() {
   const clientBaseUrlHost = collection?.clientBaseUrlHost ?? "localhost";
   const routingStrategy = collection?.routingStrategy ?? "auto";
   const modelIds = state?.modelIds ?? [];
-  const exampleModelId = modelIds[0] ?? "gpt-5.5";
+  const exampleModelId = modelIds[0] ?? "gpt-5.6-sol";
   const exampleApiKey = collection?.apiKey || "<api-key>";
   const compatibilityBaseUrls = useMemo(
     () => resolveCodexApiServiceCompatibilityBaseUrls(displayBaseUrl),
@@ -1654,21 +1652,6 @@ export function useCodexApiServicePageController() {
 
   const handleToggleEnabled = async (fromDialog = false) => {
     if (!collection) return false;
-    if (!collection.enabled) {
-      const confirmed = await confirmDialog(
-        t(
-          "codex.localAccess.riskNotice.desc",
-          "当前 Codex API 服务相关功能，本质上属于代理转发使用方式。继续使用即表示您已知悉相关情况，并愿意自行承担可能产生的风险。",
-        ),
-        {
-          title: t("codex.localAccess.riskNotice.title", "使用风险提示"),
-          kind: "warning",
-          okLabel: t("codex.localAccess.riskNotice.continueStart", "继续启动"),
-          cancelLabel: t("common.cancel", "取消"),
-        },
-      );
-      if (!confirmed) return false;
-    }
     return runAction(
       async () => {
         const next = await codexLocalAccessService.setCodexLocalAccessEnabled(
@@ -1728,25 +1711,6 @@ export function useCodexApiServicePageController() {
       );
       if (!confirmedEnableAndSwitch) return;
     }
-    if (!isCodexLocalAccessRiskNoticeDismissed()) {
-      const confirmedRisk = await confirmDialog(
-        t(
-          "codex.localAccess.riskNotice.desc",
-          "当前 Codex API 服务相关功能，本质上属于代理转发使用方式。继续使用即表示您已知悉相关情况，并愿意自行承担可能产生的风险。",
-        ),
-        {
-          title: t("codex.localAccess.riskNotice.title", "使用风险提示"),
-          kind: "warning",
-          okLabel: t(
-            "codex.localAccess.riskNotice.continueSwitch",
-            "继续切号",
-          ),
-          cancelLabel: t("common.cancel", "取消"),
-        },
-      );
-      if (!confirmedRisk) return;
-    }
-
     setActivating(true);
     setError("");
     setNotice("");
@@ -1966,49 +1930,20 @@ export function useCodexApiServicePageController() {
     }
   };
 
-  const handleRestartSidecar = async () => {
-    const confirmed = await confirmDialog(
-      t(
-        "codex.localAccess.restartConfirmMessage",
-        "将仅重启 API 服务 Sidecar，不修改账号、Token、API Key 或账号池配置。正在进行中的请求可能中断，确认继续吗？",
-      ),
-      {
-        title: t("codex.localAccess.restartTitle", "重启 API 服务"),
-        kind: "warning",
-        okLabel: t("codex.localAccess.restartAction", "重启 Sidecar"),
-        cancelLabel: t("common.cancel", "取消"),
-      },
-    );
-    if (!confirmed) return;
-    setSidecarRestarting(true);
-    setError("");
-    setNotice("");
-    try {
-      const next =
-        await codexLocalAccessService.restartCodexLocalAccessSidecar();
-      setState(next);
-      setNotice(
-        next.recovering ? "" : t("codex.localAccess.restartSuccess", "API 服务 Sidecar 已重启"),
-      );
-    } catch (err) {
-      if (
-        presentWindowsOperationError({
-          error: err,
-          operation: "start_sidecar",
-          summary: t("codex.localAccess.restartTitle", "重启 API 服务"),
-          retry: async () => {
-            const next = await codexLocalAccessService.restartCodexLocalAccessSidecar();
-            setState(next);
-          },
-        })
-      ) {
-        return;
-      }
-      setError(String(err).replace(/^Error:\s*/, ""));
-    } finally {
-      setSidecarRestarting(false);
-    }
-  };
+  const { restarting: sidecarRestarting, restart: handleRestartSidecar } = useCodexApiServiceRestart({
+    t, onState: setState, onError: setError, onNotice: setNotice,
+    presentError: (error, retry) => presentWindowsOperationError({
+      error, operation: "start_sidecar",
+      summary: t("codex.localAccess.restartTitle"), retry,
+    }),
+  });
+
+  const { openTimeoutSettings, timeoutFocusField, timeoutFieldRef } = useCodexTimeoutSettingsNavigation(() => {
+    setTimeoutsError("");
+    setSelectedTimeoutPresetId(collection?.activeTimeoutPresetId || "long_wait");
+    setTimeoutPresetNameDraft("");
+    setTimeoutDrafts(timeoutDraftsFromValue(collection?.timeouts));
+  }, () => setTimeoutsModalOpen(true));
 
   const handleUpdateAccessScope = async (value: string) => {
     const accessScope = value === "lan" ? "lan" : "localhost";
@@ -3882,6 +3817,9 @@ export function useCodexApiServicePageController() {
     timeoutPresetNameDraft,
     timeoutPresetOptions,
     timeoutsError,
+    openTimeoutSettings,
+    timeoutFocusField,
+    timeoutFieldRef,
     timeoutsModalOpen,
     toggleApiKeyPolicyExpanded,
     toggleStringSelection,

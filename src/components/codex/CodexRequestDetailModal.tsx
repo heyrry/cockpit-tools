@@ -1,21 +1,28 @@
+import { resolveCodexAccountReferenceDisplayName } from "../../utils/codexAccountDisplayName";
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Activity, CheckCircle2, ChevronDown, Clock3, Copy, FileJson, Gauge, Info, RefreshCw, Route, X, XCircle } from 'lucide-react';
 import type { CodexLocalAccessRequestDetail, CodexLocalAccessUsageEvent } from '../../types/codexLocalAccess';
 import { getCodexLocalAccessRequestDetail } from '../../services/codexLocalAccessService';
-import { formatRequestDiagnosticError, formatRequestPayloadBody, hasRequestFirstResponse, requestDiagnosticPhaseKey } from '../../utils/codexRequestDiagnostics';
+import { formatRequestDiagnosticError, formatRequestPayloadBody, hasRequestFirstResponse, requestDiagnosticPhaseKey, requestServiceTierPresentation, requestedServiceTierLabelKey } from '../../utils/codexRequestDiagnostics';
 import { useEscCloseTopmost } from '../../hooks/useEscClose';
 import { useModalFocusTrap } from '../../hooks/useModalFocusTrap';
 import { useModalScrollLock } from '../../hooks/useModalScrollLock';
 import { ModalErrorMessage } from '../ModalErrorMessage';
 import { SingleSelectDropdown } from '../SingleSelectDropdown';
+import { CodexRequestTimeoutHint } from './CodexRequestTimeoutHint';
+import type { RequestTimeoutField } from '../../utils/codexRequestDiagnostics';
 import { CodexOutputSpeed } from './CodexOutputSpeed';
+import { CodexRequestIdentityHeaders } from './CodexRequestIdentityHeaders';
+import './CodexRequestIdentityHeaders.css';
 import './CodexRequestDiagnostics.css';
 
-export function CodexRequestDetailModal({ event, maskAccountText, onClose }: {
+export function CodexRequestDetailModal({ event, accountDisplayNames = new Map(), maskAccountText, onOpenTimeoutSettings, onClose }: {
   event: CodexLocalAccessUsageEvent;
+  accountDisplayNames?: ReadonlyMap<string, string>;
   maskAccountText: (value?: string | null) => string;
+  onOpenTimeoutSettings?: (field: RequestTimeoutField) => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -25,6 +32,7 @@ export function CodexRequestDetailModal({ event, maskAccountText, onClose }: {
   const [detail, setDetail] = useState<CodexLocalAccessRequestDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [errorScrollKey, setErrorScrollKey] = useState(0);
   const [selectedPayload, setSelectedPayload] = useState('0');
   const [showHeaders, setShowHeaders] = useState(false);
   const [notice, setNotice] = useState('');
@@ -38,7 +46,7 @@ export function CodexRequestDetailModal({ event, maskAccountText, onClose }: {
       const value = await getCodexLocalAccessRequestDetail(event.requestId);
       if (active.current && version.current === requestVersion) { setDetail(value); setSelectedPayload('0'); setShowHeaders(false); }
     } catch (cause) {
-      if (active.current && version.current === requestVersion) setError(formatRequestDiagnosticError(cause, t));
+      if (active.current && version.current === requestVersion) { setError(formatRequestDiagnosticError(cause, t)); setErrorScrollKey((value) => value + 1); }
     } finally {
       if (active.current && version.current === requestVersion) setLoading(false);
     }
@@ -56,11 +64,14 @@ export function CodexRequestDetailModal({ event, maskAccountText, onClose }: {
       await navigator.clipboard.writeText(value);
       if (active.current && version.current === currentVersion) setNotice(t('common.success'));
     } catch (cause) {
-      if (active.current && version.current === currentVersion) setError(formatRequestDiagnosticError(cause, t));
+      if (active.current && version.current === currentVersion) { setError(formatRequestDiagnosticError(cause, t)); setErrorScrollKey((value) => value + 1); }
     }
   };
   const payload = detail?.payloads[Number(selectedPayload)];
   const firstResponseMs = detail?.firstResponseMs ?? event.firstResponseMs;
+  const tiers = requestServiceTierPresentation(event);
+  const requestedTierKey = requestedServiceTierLabelKey(tiers.requested);
+  const requestedTierLabel = requestedTierKey ? t(requestedTierKey) : tiers.requested;
   return createPortal(<div className="modal-overlay codex-request-detail-overlay">
     <div className="modal codex-request-detail-modal" ref={dialog} role="dialog" aria-modal="true" aria-labelledby="codex-request-detail-title" tabIndex={-1}>
       <div className="modal-header">
@@ -78,10 +89,19 @@ export function CodexRequestDetailModal({ event, maskAccountText, onClose }: {
           <div className="codex-request-metric"><span><Gauge size={14} aria-hidden="true" />{t('common.outputSpeed.label')}</span><strong><CodexOutputSpeed event={event} t={t} hideLabel /></strong></div>
         </div>
         <p className="codex-request-diagnostics-hint codex-request-detail-explanation"><Info size={14} aria-hidden="true" /><span>{t('codex.requestDiagnostics.firstResponseHint')}</span></p>
+        <section className="codex-request-detail-section" aria-labelledby="codex-request-tier-title">
+          <h4 id="codex-request-tier-title"><Gauge size={16} aria-hidden="true" />{t('codex.apiService.logs.serviceTier')}</h4>
+          <p>{t('codex.apiService.logs.requestedTier', { tier: requestedTierLabel || '—' })}</p>
+          <p>{t('codex.apiService.logs.responseTier', { tier: tiers.response || '—' })}</p>
+          <p className="codex-request-diagnostics-hint">{t('codex.apiService.logs.serviceTierHint')}</p>
+          {tiers.legacy && <><p>{t('codex.apiService.logs.legacyTier', { tier: tiers.legacy })}</p><p className="codex-request-diagnostics-hint">{t('codex.apiService.logs.legacyTierHint')}</p></>}
+        </section>
         {detail?.failurePhase && <div className="codex-request-detail-failure"><span>{t('codex.requestDiagnostics.failurePhase')}</span><strong>{t(requestDiagnosticPhaseKey(detail.failurePhase))}</strong></div>}
+        <CodexRequestTimeoutHint event={event} onOpenSettings={onOpenTimeoutSettings} />
         {loading && <p className="codex-request-diagnostics-hint" role="status">{t('common.loading')}</p>}
         {!loading && !detail && !error && <p>{t('codex.requestDiagnostics.unavailable')}</p>}
         {detail && <>
+          <CodexRequestIdentityHeaders detail={detail} t={t} accountDisplayNames={accountDisplayNames} maskAccountText={maskAccountText} onCopy={copy} />
           <section className="codex-request-detail-section" aria-labelledby="codex-request-attempts-title">
             <h4 id="codex-request-attempts-title"><Route size={16} aria-hidden="true" />{t('codex.requestDiagnostics.attempts')}<span className="codex-request-section-count">{detail.attempts.length}</span></h4>
             {detail.attempts.length === 0 ? <p className="codex-request-diagnostics-hint">{t('codex.requestDiagnostics.noAttempts')}</p> : <ol className="codex-request-attempts">
@@ -89,7 +109,7 @@ export function CodexRequestDetailModal({ event, maskAccountText, onClose }: {
                 <span className="codex-request-attempt-number">{attempt.sequence}</span>
                 <div className="codex-request-attempt-content">
                   <div className="codex-request-attempt-heading">
-                    <strong>{maskAccountText(attempt.accountEmail || attempt.accountId)}</strong>
+                    <strong>{maskAccountText(resolveCodexAccountReferenceDisplayName(attempt.accountId, attempt.accountEmail, accountDisplayNames, t("common.apiKeyAccount")))}</strong>
                     <span className={`codex-request-attempt-status ${attempt.success ? 'success' : 'error'}`}>
                       {attempt.success ? <CheckCircle2 size={13} aria-hidden="true" /> : <XCircle size={13} aria-hidden="true" />}
                       {t(attempt.success ? 'codex.localAccess.requestLogSuccess' : 'codex.localAccess.requestLogFailed')}
@@ -131,7 +151,7 @@ export function CodexRequestDetailModal({ event, maskAccountText, onClose }: {
             </div>}
           </section>
         </>}
-        <ModalErrorMessage message={error} position="bottom" />
+        <ModalErrorMessage message={error} position="bottom" scrollKey={errorScrollKey} />
         {notice && <p className="codex-request-detail-notice" role="status">{notice}</p>}
       </div>
       <div className="modal-footer">

@@ -8,6 +8,10 @@ fn default_image_generation_model() -> String {
     DEFAULT_CODEX_IMAGE_GENERATION_MODEL.to_string()
 }
 
+pub fn default_image_generation_models() -> Vec<String> {
+    vec!["gpt-image-2.5".to_string(), "gpt-image-2".to_string()]
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -88,11 +92,12 @@ impl Default for CodexLocalAccessImageGenerationMode {
 pub enum CodexLocalAccessGatewayMode {
     Legacy,
     Sidecar,
+    Native,
 }
 
 impl Default for CodexLocalAccessGatewayMode {
     fn default() -> Self {
-        Self::Sidecar
+        Self::Native
     }
 }
 
@@ -527,16 +532,28 @@ pub struct CodexLocalAccessCollection {
     pub image_generation_mode: CodexLocalAccessImageGenerationMode,
     #[serde(default = "default_image_generation_model")]
     pub image_generation_model: String,
+    #[serde(default = "default_image_generation_models")]
+    pub image_generation_models: Vec<String>,
+    #[serde(default)]
+    pub image_generation_deleted_models: Vec<String>,
+    #[serde(default)]
+    pub image_generation_model_catalog_revision: u64,
     /// None preserves the legacy image relay model without expanding account catalogs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generation_main_model: Option<String>,
     #[serde(default)]
     pub image_generation_account_policies: HashMap<String, CodexLocalAccessImageGenerationPolicy>,
-    /// 生图转发账号池：生图请求只允许落到这些 OAuth 账号；为空表示不转发。
+    /// 生图转发账号池：生图请求只允许落到所选 OAuth / API Key 来源。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_generation_account_ids: Vec<String>,
+    /// 生图来源账号 ID → 用户明确选择的完整上游图片模型 ID。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub image_generation_account_models: HashMap<String, String>,
     #[serde(default)]
     pub gateway_mode: CodexLocalAccessGatewayMode,
+    /// Marks the one-time switch to the native default. Later user choices survive upgrades.
+    #[serde(default)]
+    pub native_gateway_default_migrated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_proxy_url: Option<String>,
     #[serde(default)]
@@ -766,7 +783,7 @@ pub struct CodexLocalAccessUsageEvent {
     pub proxy_route: Option<CodexLocalAccessProxyRoute>,
     #[serde(default)]
     pub model_id: String,
-    /// 客户端请求的模型（保留路由命名空间前缀，如 `cpa/gpt-5.5`）。
+    /// 客户端请求的模型（保留路由命名空间前缀，如 `cpa/gpt-5.6-sol`）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub requested_model: String,
     /// 实际发送给上游的模型（账号映射与路由改写之后）。
@@ -778,6 +795,12 @@ pub struct CodexLocalAccessUsageEvent {
     pub request_kind: CodexLocalAccessRequestKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
+    /// Final outbound field value (auto when omitted), independent from upstream feedback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_service_tier: Option<String>,
+    /// Verbatim upstream response value; OAuth feedback does not confirm scheduling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_service_tier: Option<String>,
     /// Request reasoning effort (e.g. low/medium/high/xhigh/max), when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -904,6 +927,20 @@ pub struct CodexLocalAccessUsageEventPage {
 pub struct CodexLocalAccessRequestAttempt {
     pub sequence: u32,
     #[serde(default)]
+    pub upstream_identity_metadata_captured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_installation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_chatgpt_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_identity: Option<crate::modules::codex_api_identity::InstallationProfile>,
+    #[serde(default)]
+    pub upstream_identity_captured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_thread_id: Option<String>,
+    #[serde(default)]
     pub account_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_email: Option<String>,
@@ -954,6 +991,18 @@ pub struct CodexLocalAccessRequestPayload {
 #[serde(rename_all = "camelCase")]
 pub struct CodexLocalAccessRequestDetail {
     pub request_id: String,
+    #[serde(default)]
+    pub client_identity_metadata_captured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_installation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_chatgpt_account_id: Option<String>,
+    #[serde(default)]
+    pub client_identity_captured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_response_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

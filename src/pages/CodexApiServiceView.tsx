@@ -1,4 +1,6 @@
 import { CodexApiRequestLogs } from "./CodexApiRequestLogs";
+import { useState } from "react";
+import { CodexGatewayModeControl, formatCodexGatewayModeError } from "../components/codex/CodexGatewayModeControl";
 import { CodexSpeedControl } from "../components/codex/CodexSpeedControl";
 import { Activity, BadgeDollarSign, ChevronDown, Check, CircleAlert, Copy, Eye, EyeOff, FolderPlus, Gauge, Image, Pin, PinOff, Play, Plus, Power, RefreshCw, Route, Send, ShieldCheck, SlidersHorizontal, Trash2, Undo2, Wrench, X } from "lucide-react";
 import { CodexIcon } from "../components/icons/CodexIcon";
@@ -33,6 +35,7 @@ export type CodexApiServiceViewProps = ReturnType<typeof useCodexApiServicePageC
 
 /** 渲染 CodexApiServicePage 的界面；业务状态与动作统一由 Controller 提供。 */
 export function CodexApiServiceView(props: CodexApiServiceViewProps) {
+  const [gatewaySaving, setGatewaySaving] = useState(false);
   const {
     accessScope,
     inspectionNoticeKey,
@@ -64,7 +67,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
     apiServiceIsCurrent,
     applyTimeoutPreset,
     availableAccountCount,
-    busy,
+    busy: controllerBusy,
     clearTestChat,
     clientBaseUrlHost,
     clientBaseUrlHostOptions,
@@ -210,13 +213,11 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
     setProxyInput,
     setResponsesWebsocketsEnabledDraft,
     setSelectedModelId,
-    setSelectedTimeoutPresetId,
     setSessionAffinityDraft,
     setSessionAffinityTtlDraft,
     setState,
     setStatsLogTab,
     setTestChatInput,
-    setTimeoutDrafts,
     setTimeoutPresetNameDraft,
     setTimeoutsError,
     setTimeoutsModalOpen,
@@ -238,17 +239,20 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
     testDialogOpen,
     testDialogRunning,
     timeoutDrafts,
-    timeoutDraftsFromValue,
     timeoutPresetNameDraft,
     timeoutPresetOptions,
     timeoutsError,
     timeoutsModalOpen,
+    openTimeoutSettings,
+    timeoutFocusField,
+    timeoutFieldRef,
     toggleApiKeyPolicyExpanded,
     toggleStringSelection,
     updateAccountModelMappingDraft,
     updatePricingDraft,
     updateTimeoutDraft,
   } = props;
+  const busy = controllerBusy || gatewaySaving;
   const localAccessStatus = resolveCodexLocalAccessRuntimeStatus(collection, state);
   const keyRecoveryRequired = isCodexGatewayKeyRecoveryError(state?.lastError);
   return (
@@ -355,13 +359,13 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                 testDialogRunning ||
                 sidecarRestarting
               }
-              title={t("codex.localAccess.restartAction", "重启 Sidecar")}
+              title={t("codex.localAccess.restartAction")}
             >
               <RefreshCw
                 size={14}
                 className={sidecarRestarting ? "loading-spinner" : ""}
               />
-              {t("codex.localAccess.restartAction", "重启 Sidecar")}
+              {t("codex.localAccess.restartAction")}
             </button>
             <button
               type="button"
@@ -443,7 +447,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
             {error && error !== state?.lastError && (
               <div className="codex-api-service-message error">
                 <CircleAlert size={15} />
-                <span>{error}</span>
+                <span>{formatCodexGatewayModeError(t, error)}</span>
                 <button
                   type="button"
                   className="codex-api-service-message-dismiss"
@@ -460,7 +464,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                 <CircleAlert size={15} />
                 <span>{keyRecoveryRequired
                   ? t(state.running ? "codex.apiService.recovery.partialUnavailable" : "codex.apiService.recovery.unavailable")
-                  : state.lastError}</span>
+                  : formatCodexGatewayModeError(t, state.lastError)}</span>
                 <button type="button" className="btn btn-secondary btn-sm"
                   onClick={() => void handleRestartSidecar()}
                   disabled={busy || sidecarRestarting || state.preparing}>
@@ -559,6 +563,9 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                 <h2>{t("codex.localAccess.configTitle", "服务配置")}</h2>
               </div>
               <div className="codex-api-service-config-list">
+                <CodexGatewayModeControl state={state} onState={setState}
+                  disabled={busy || activating || testDialogRunning || sidecarRestarting}
+                  onError={setError} onNotice={setNotice} onSavingChange={setGatewaySaving} />
                 <label>
                   <span>Base URL</span>
                   <div className="codex-api-service-copy-row">
@@ -698,17 +705,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                     <button
                       type="button"
                       className="btn btn-secondary btn-sm"
-                      onClick={() => {
-                        setTimeoutsError("");
-                        setSelectedTimeoutPresetId(
-                          collection?.activeTimeoutPresetId || "long_wait",
-                        );
-                        setTimeoutPresetNameDraft("");
-                        setTimeoutDrafts(
-                          timeoutDraftsFromValue(collection?.timeouts),
-                        );
-                        setTimeoutsModalOpen(true);
-                      }}
+                      onClick={() => openTimeoutSettings()}
                       disabled={!collection}
                     >
                       <SlidersHorizontal size={14} />
@@ -2406,6 +2403,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                       type="number"
                       min={1}
                       max={600}
+                      ref={timeoutFocusField === "sidecarStreamOpenTimeoutMs" ? timeoutFieldRef : undefined}
                       value={timeoutDrafts.sidecarStreamOpenTimeoutMs}
                       onChange={(event) =>
                         updateTimeoutDraft(
@@ -2423,6 +2421,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                       type="number"
                       min={1}
                       max={600}
+                      ref={timeoutFocusField === "sidecarStreamIdleTimeoutMs" ? timeoutFieldRef : undefined}
                       value={timeoutDrafts.sidecarStreamIdleTimeoutMs}
                       onChange={(event) =>
                         updateTimeoutDraft(
@@ -2440,6 +2439,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                       type="number"
                       min={1}
                       max={600}
+                      ref={timeoutFocusField === "sidecarImageStreamOpenTimeoutMs" ? timeoutFieldRef : undefined}
                       value={timeoutDrafts.sidecarImageStreamOpenTimeoutMs}
                       onChange={(event) =>
                         updateTimeoutDraft(
@@ -2457,6 +2457,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
                       type="number"
                       min={1}
                       max={600}
+                      ref={timeoutFocusField === "sidecarImageStreamIdleTimeoutMs" ? timeoutFieldRef : undefined}
                       value={timeoutDrafts.sidecarImageStreamIdleTimeoutMs}
                       onChange={(event) =>
                         updateTimeoutDraft(
@@ -3751,6 +3752,7 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
         isOpen={memberModalOpen}
         mode="members"
         state={state}
+        onStateChange={setState}
         addressKind={addressKind}
         addressOptions={[
           {
@@ -3846,9 +3848,9 @@ export function CodexApiServiceView(props: CodexApiServiceViewProps) {
         onUpdateImageGenerationMainModel={(model) =>
           codexLocalAccessService.updateCodexLocalAccessImageGenerationMainModel(model).then(setState)
         }
-        onUpdateImageGenerationAccounts={(accountIds) =>
+        onUpdateImageGenerationAccounts={(accountIds, models) =>
           codexLocalAccessService
-            .updateCodexLocalAccessImageGenerationAccounts(accountIds)
+            .updateCodexLocalAccessImageGenerationAccounts(accountIds, models)
             .then(setState)
         }
         onUpdateUpstreamProxyConfig={(url) =>

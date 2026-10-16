@@ -64,12 +64,15 @@ function resolveIssueDisplayName(
   account: CodexAccount | undefined,
   health: CodexLocalAccessAccountHealth | null,
   accountId: string,
+  apiKeyLabel: string,
 ): string {
   return resolveCodexHealthIssueDisplayName(
     account?.account_name,
     account?.email,
     health?.email,
     accountId,
+    account,
+    apiKeyLabel,
   );
 }
 
@@ -123,11 +126,14 @@ function formatCooldown(
     hour: "2-digit",
     minute: "2-digit",
   });
-  return t("codex.localAccess.accountPoolHealth.dialog.cooldownUntil", {
+  const until = t("codex.localAccess.accountPoolHealth.dialog.cooldownUntil", {
     model,
     time,
     defaultValue: "模型 {{model}} 冷却至 {{time}}",
   });
+  return cooldown.reason === "transient_upstream"
+    ? `${until} · ${t("codex.localAccess.accountPoolHealth.dialog.upstreamDetail")}`
+    : until;
 }
 
 type PoolMemberStatus =
@@ -135,6 +141,7 @@ type PoolMemberStatus =
 
 function isRecoverableReason(reason: string | null | undefined): boolean {
   return ![
+    "state_refreshing",
     "disabled",
     "missing",
     "quota_reserved",
@@ -231,7 +238,7 @@ export function CodexAccountPoolHealthModal({
       const health = healthById.get(accountId) ?? null;
       const kind = issueKindForHealth(account, health);
       if (!kind) return [];
-      const rawName = resolveIssueDisplayName(account, health, accountId);
+      const rawName = resolveIssueDisplayName(account, health, accountId, t("common.apiKeyAccount"));
       const displayName = maskAccountText ? maskAccountText(rawName) : rawName;
       const presentation = account
         ? buildCodexAccountPresentation(account, t)
@@ -350,6 +357,8 @@ export function CodexAccountPoolHealthModal({
       );
     }
     switch (issue.health?.schedulerReason) {
+      case "state_refreshing":
+        return t("common.loading");
       case "payment_required":
         return t(
           "codex.localAccess.accountPoolHealth.dialog.paymentDetail",
@@ -701,6 +710,7 @@ export function CodexAccountPoolHealthModal({
                       account,
                       null,
                       member.accountEmail || member.accountId,
+                      t("common.apiKeyAccount"),
                     );
                     const displayName = maskAccountText
                       ? maskAccountText(rawName)

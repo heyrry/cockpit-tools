@@ -54,6 +54,10 @@ fn allocate_initial_local_port(bind_host: &str) -> Result<u16, String> {
 
 fn load_collection_from_disk() -> Result<Option<CodexLocalAccessCollection>, String> {
     let path = local_access_file_path()?;
+    load_collection_from_path(&path)
+}
+
+fn load_collection_from_path(path: &Path) -> Result<Option<CodexLocalAccessCollection>, String> {
     if !path.exists() {
         return Ok(None);
     }
@@ -87,6 +91,43 @@ fn load_collection_from_disk() -> Result<Option<CodexLocalAccessCollection>, Str
     }
 }
 
+fn load_collection_for_runtime_from_path(
+    path: &Path,
+) -> Result<Option<CodexLocalAccessCollection>, String> {
+    let Some(parsed) = load_collection_from_path(path)? else {
+        return Ok(None);
+    };
+    if !parsed.native_gateway_default_migrated
+        || parsed.gateway_mode == CodexLocalAccessGatewayMode::Legacy
+    {
+        // Only cold runtime initialization may migrate. Catalog and import reads
+        // must not modify the configuration underlying their revision snapshots.
+        return migrate_native_gateway_default_on_disk(path).map(Some);
+    }
+    Ok(Some(parsed))
+}
+
+fn migrate_native_gateway_default_on_disk(
+    path: &Path,
+) -> Result<CodexLocalAccessCollection, String> {
+    let mut loaded = None;
+    update_string_atomic(path, |current| {
+        let current = current.ok_or_else(|| "API service configuration is missing".to_string())?;
+        let collection: CodexLocalAccessCollection =
+            serde_json::from_str(current).map_err(|error| error.to_string())?;
+        let content = if !collection.native_gateway_default_migrated
+            || collection.gateway_mode == CodexLocalAccessGatewayMode::Legacy
+        {
+            native_patch_mode(current, CodexLocalAccessGatewayMode::Native)?
+        } else {
+            current.to_string()
+        };
+        loaded = Some(serde_json::from_str(&content).map_err(|error| error.to_string())?);
+        Ok(content)
+    })?;
+    loaded.ok_or_else(|| "API service configuration is missing".to_string())
+}
+
 fn save_collection_to_disk(collection: &CodexLocalAccessCollection) -> Result<(), String> {
     let path = local_access_file_path()?;
     save_collection_to_path(&path, collection)
@@ -95,11 +136,38 @@ fn save_collection_to_disk(collection: &CodexLocalAccessCollection) -> Result<()
 fn save_collection_to_path(path: &Path, collection: &CodexLocalAccessCollection) -> Result<(), String> {
     update_string_atomic(path, |current| {
         let mut next = collection.clone();
+        next.image_generation_main_model =
+            normalize_image_generation_main_model(next.image_generation_main_model.clone())
+                .unwrap_or(None);
         if let Some(current) = current {
             // Background statistics and unrelated settings may hold an older snapshot.
             // Explicit body-recording choices must survive every full collection write.
             match serde_json::from_str::<Value>(current) {
                 Ok(current) => {
+                    // A stale pre-upgrade snapshot must not clear the migration marker.
+                    next.native_gateway_default_migrated |= current
+                        .get("nativeGatewayDefaultMigrated")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    // Only the engine-switch transaction owns this field. An older stats or
+                    // settings snapshot must never silently switch the service back.
+                    if let Some(mode) = current.get("gatewayMode").cloned()
+                        .and_then(|value| serde_json::from_value::<CodexLocalAccessGatewayMode>(value).ok())
+                        .filter(|mode| *mode != CodexLocalAccessGatewayMode::Legacy) {
+                        next.gateway_mode = mode;
+                    }
+                    // Ordinary full-snapshot writers do not own the image model directory.
+                    // The dedicated field transaction alone can add/delete/restore a model.
+                    if current.get("imageGenerationModels").is_some() {
+                        let latest: CodexLocalAccessCollection = serde_json::from_value(current.clone())
+                            .map_err(|error| format!("读取最新生图型号目录失败: {}", error))?;
+                        copy_image_model_catalog_fields(&mut next, &latest);
+                    }
+                    // Only the dedicated image settings transaction changes this field.
+                    // Normalize the newest disk value, not an older stats snapshot.
+                    next.image_generation_main_model = normalize_image_generation_main_model(
+                        current.get("imageGenerationMainModel").and_then(Value::as_str).map(str::to_owned),
+                    ).unwrap_or(None);
                     next.request_payload_logging = current.get("requestPayloadLogging")
                         .and_then(Value::as_bool)
                         .unwrap_or_else(|| REQUEST_PAYLOAD_LOGGING_ENABLED.load(Ordering::SeqCst));
@@ -1501,8 +1569,8 @@ fn sanitize_collection_structure(
 ) -> Result<bool, String> {
     let mut changed = false;
 
-    // The legacy gateway is retired. Existing collections are migrated to the
-    // sidecar before runtime startup and persisted by the normal load path.
+    // Persisted global collections already migrate to native during loading.
+    // Keep the legacy fallback for unpersisted compatibility/profile snapshots.
     changed |= migrate_legacy_gateway_mode(collection);
 
     // v1.3.4 起已移除集合级 image_generation 禁用 UI。
@@ -1528,6 +1596,8 @@ fn sanitize_collection_structure(
         collection.image_generation_model = normalized_image_generation_model;
         changed = true;
     }
+
+    changed |= sanitize_image_model_catalog(collection);
 
     if collection.port == 0 {
         collection.port = allocate_initial_local_port(bind_host_for_collection(collection))?;
@@ -1686,6 +1756,14 @@ fn sanitize_collection_with_accounts(
         })
         .map(|account| account.id.clone())
         .collect();
+    let valid_image_source_ids: HashSet<String> = accounts
+        .iter()
+        // Declared sources must survive a selected-model mismatch; an empty image scope
+        // would silently fall back to the conversation provider. Dispatch validates exact ID.
+        .filter(|account| !account.is_agent_identity_auth()
+            && (account.is_api_key_auth() || codex_account::account_has_refresh_token(account)))
+        .map(|account| account.id.clone())
+        .collect();
     let valid_account_ids: HashSet<String> = accounts
         .iter()
         .filter(|account| {
@@ -1742,21 +1820,11 @@ fn sanitize_collection_with_accounts(
         changed = true;
     }
 
-    // 成员移除后同步清理策略，避免旧账号策略影响后续重新加入的账号。
-    let before_image_policies = collection.image_generation_account_policies.clone();
-    let pool_account_ids: HashSet<&str> = collection.account_ids.iter().map(String::as_str).collect();
-    collection
-        .image_generation_account_policies
-        .retain(|account_id, _| pool_account_ids.contains(account_id.as_str()));
-    if collection.image_generation_account_policies != before_image_policies {
-        changed = true;
-    }
-
-    // 生图转发账号池只允许指向仍然有效的 OAuth 账号。
+    // 生图转发账号池接受 OAuth 和匹配当前图片模型的 API Key。
     let before_image_accounts = collection.image_generation_account_ids.clone();
     let mut deduped_image_accounts: Vec<String> = Vec::new();
     for account_id in &collection.image_generation_account_ids {
-        if !keep_reference(account_id, &valid_bound_oauth_account_ids) {
+        if !keep_reference(account_id, &valid_image_source_ids) {
             changed = true;
             continue;
         }
@@ -1768,6 +1836,20 @@ fn sanitize_collection_with_accounts(
     }
     if deduped_image_accounts != before_image_accounts {
         collection.image_generation_account_ids = deduped_image_accounts;
+        changed = true;
+    }
+
+    let before_image_models = collection.image_generation_account_models.clone();
+    collection.image_generation_account_models.retain(|id, _| collection.image_generation_account_ids.contains(id));
+    changed |= collection.image_generation_account_models != before_image_models;
+
+    // 清理对话池与显式图片池都已移除的策略，保留实例 self 生图来源的 Enabled。
+    let before_image_policies = collection.image_generation_account_policies.clone();
+    let pool_account_ids: HashSet<&str> = collection.account_ids.iter().chain(collection.image_generation_account_ids.iter()).map(String::as_str).collect();
+    collection
+        .image_generation_account_policies
+        .retain(|account_id, _| pool_account_ids.contains(account_id.as_str()));
+    if collection.image_generation_account_policies != before_image_policies {
         changed = true;
     }
 
@@ -1842,7 +1924,7 @@ async fn ensure_runtime_loaded_without_start_with_profile_restore(
     let load_guard = GatewayRuntimeLoadGuard;
     tauri::async_runtime::spawn_blocking(move || {
         let _load_guard = load_guard;
-        let loaded_collection = load_collection_from_disk()?;
+        let loaded_collection = load_collection_for_runtime_from_path(&local_access_file_path()?)?;
         refresh_api_service_experimental_model_ids();
         let mut next_collection = loaded_collection;
         let mut persist_after_load = false;
@@ -1857,10 +1939,15 @@ async fn ensure_runtime_loaded_without_start_with_profile_restore(
                 client_base_url_host: CodexLocalAccessClientBaseUrlHost::default(),
                 image_generation_mode: CodexLocalAccessImageGenerationMode::default(),
                 image_generation_model: DEFAULT_CODEX_IMAGE_GENERATION_MODEL.to_string(),
+        image_generation_models: crate::models::codex_local_access::default_image_generation_models(),
+        image_generation_deleted_models: Vec::new(),
+        image_generation_model_catalog_revision: 0,
                 image_generation_main_model: None,
                 image_generation_account_policies: HashMap::new(),
                 image_generation_account_ids: Vec::new(),
+        image_generation_account_models: HashMap::new(),
                 gateway_mode: CodexLocalAccessGatewayMode::default(),
+                native_gateway_default_migrated: true,
                 upstream_proxy_url: None,
                 routing_strategy: CodexLocalAccessRoutingStrategy::default(),
                 custom_routing_rules: Vec::new(),
@@ -2066,7 +2153,7 @@ async fn ensure_gateway_matches_runtime() -> Result<(), String> {
                 .clone()
                 .filter(|collection| collection.enabled && runtime.running)
         };
-        if let Some(collection) = collection {
+        if let Some(collection) = collection.filter(|item| collection_gateway_mode(item) == CodexLocalAccessGatewayMode::Sidecar) {
             trigger_sidecar_account_refresh_in_background(collection);
         }
     }
@@ -2260,6 +2347,17 @@ pub async fn reevaluate_bound_oauth_quota_reserve_after_refresh(
 
 fn refresh_gateway_process_status(runtime: &mut GatewayRuntime) -> Option<SidecarProcessExit> {
     if !runtime.running {
+        return None;
+    }
+    if let Some(handle) = runtime.native_handle.as_ref() {
+        if handle.is_finished() {
+            NATIVE_API_RUNNING.store(false, Ordering::Release);
+            runtime.running = false;
+            runtime.actual_port = None;
+            runtime.actual_bind_host = None;
+            runtime.last_error = Some("NATIVE_API_STOPPED".into());
+            runtime.native_handle = None;
+        }
         return None;
     }
     let Some(child) = runtime.sidecar_child.as_mut() else {
